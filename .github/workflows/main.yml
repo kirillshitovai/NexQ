@@ -35,7 +35,9 @@ jobs:
 
       - name: Install JavaScript dependencies
         run: npm ci
-
+      - name: Stage ONNX Runtime
+        run: node scripts/fetch-onnxruntime.mjs
+        
       - name: Check patched Rust source
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
