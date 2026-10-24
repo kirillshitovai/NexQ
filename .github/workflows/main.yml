@@ -1,0 +1,51 @@
+name: NexQ Parakeet - Windows test build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/parakeet-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout patched sources
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust compilation
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          prefix-key: nexq-parakeet-test-v1
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Check patched Rust source
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Build unsigned Windows installer
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Save Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexQ-Parakeet-Windows-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
