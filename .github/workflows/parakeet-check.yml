@@ -1,0 +1,140 @@
+name: Parakeet check
+
+# Verifies the NeMo Parakeet TDT patch outside of the Tauri app:
+#   core-tests   the dependency-free logic (Fbank, TDT loop, tokens.txt validation, segmenter, stream driver)
+#   harness      builds tools/ort_harness: the REAL nemo_parakeet*.rs against the REAL `ort` crate (same features as NexQ)
+#   real-model   (manual run only) downloads the Parakeet model and runs Russian WAVs through the production route
+#                with a chosen ONNX Runtime version, on Windows
+# The normal CI (ci.yml) keeps compiling the whole app; this workflow does not replace it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      real_model:
+        description: "Download the Parakeet model (~465 MB) and run the real-model check"
+        type: boolean
+        default: true
+      ort_version:
+        description: "ONNX Runtime used by the real-model check"
+        type: choice
+        options: ["1.25.0", "1.24.2"]
+        default: "1.25.0"
+      variant:
+        description: "Force a front end (release | test_onnx | master | hann_nopad); empty = automatic"
+        type: string
+        default: ""
+  push:
+    paths:
+      - "src-tauri/src/stt/nemo_parakeet*.rs"
+      - "src-tauri/src/stt/ort_streaming.rs"
+      - "tools/ort_harness/**"
+      - ".github/workflows/parakeet-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parakeet-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and run the unit tests of the core module
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/pk"
+          rustc --edition 2021 --test -O src-tauri/src/stt/nemo_parakeet_core.rs -o "$RUNNER_TEMP/pk/core_tests"
+          "$RUNNER_TEMP/pk/core_tests" --test-threads=2
+
+  harness:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/ort_harness
+          prefix-key: v1-parakeet-harness
+      - name: Pin dependency versions to the application's Cargo.lock
+        shell: pwsh
+        run: |
+          if (Test-Path src-tauri/Cargo.lock) { Copy-Item src-tauri/Cargo.lock tools/ort_harness/Cargo.lock -Force }
+      - name: Build the harness
+        run: cargo build --release --manifest-path tools/ort_harness/Cargo.toml
+
+  real-model:
+    if: github.event_name == 'workflow_dispatch' && inputs.real_model
+    needs: [core-tests, harness]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/ort_harness
+          prefix-key: v1-parakeet-harness
+
+      - name: ONNX Runtime ${{ inputs.ort_version }} (official Microsoft build, checksum-verified)
+        shell: pwsh
+        run: |
+          $ver = "${{ inputs.ort_version }}"
+          $sums = @{
+            "1.25.0" = "da753f762bf2400e7191ec594086b186a7051d5af8dc886f6e2020c2403df738"
+            "1.24.2" = "8e3e9c826375352e29cb2614fe44f3d7a4b0ff7b8028ad7a456af9d949a7e8b0"
+          }
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ver/onnxruntime-win-x64-$ver.zip"
+          Invoke-WebRequest -Uri $url -OutFile ort.zip
+          $got = (Get-FileHash ort.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $sums[$ver]) { throw "checksum mismatch for $url`n expected $($sums[$ver])`n got      $got" }
+          Expand-Archive ort.zip -DestinationPath ort_dl
+          $dll = Join-Path $PWD "ort_dl/onnxruntime-win-x64-$ver/lib/onnxruntime.dll"
+          if (-not (Test-Path $dll)) { throw "onnxruntime.dll not found in the archive" }
+          "NEXQ_ORT_LIB=$dll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Parakeet model cache
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: parakeet-tdt-0.6b-v3-int8-v1
+
+      - name: Download the Parakeet TDT 0.6B v3 int8 model (same archive NexQ downloads)
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force models | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2" -OutFile model.tar.bz2
+          # Windows' bsdtar reads .tar.bz2 natively; GNU tar from Git Bash might not.
+          & "$env:SystemRoot\System32\tar.exe" -xjf model.tar.bz2 -C models
+          if ($LASTEXITCODE -ne 0) { throw "tar failed" }
+          Remove-Item model.tar.bz2
+
+      - name: Pin dependency versions to the application's Cargo.lock
+        shell: pwsh
+        run: |
+          if (Test-Path src-tauri/Cargo.lock) { Copy-Item src-tauri/Cargo.lock tools/ort_harness/Cargo.lock -Force }
+
+      - name: Real-model check (Russian WAVs through the production route)
+        shell: bash
+        env:
+          NEXQ_MODEL_DIR: models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
+          NEXQ_WAV_DIR: tools/ort_harness/testdata
+          NEXQ_EXPECT_FILE: tools/ort_harness/testdata/expect.txt
+          NEXQ_PARAKEET_VARIANT: ${{ inputs.variant }}
+          RUST_BACKTRACE: "1"
+        run: |
+          ls -la "$NEXQ_MODEL_DIR"
+          cargo run --release --manifest-path tools/ort_harness/Cargo.toml 2>&1 | tee harness.log
+
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parakeet-harness-log-ort-${{ inputs.ort_version }}
+          path: harness.log
+          if-no-files-found: ignore
