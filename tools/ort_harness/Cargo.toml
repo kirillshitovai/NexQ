@@ -1,0 +1,17 @@
+# Standalone real-model check of the NeMo Parakeet patch (no Tauri, no UI).
+# Compiles the real src-tauri/src/stt/nemo_parakeet*.rs against the real `ort` crate with the same
+# features NexQ uses, and sends WAV audio through the same entry point the application uses.
+# Run it with: see README.md ("Проверка на реальной модели") or .github/workflows/parakeet-check.yml.
+[package]
+name = "nexq-parakeet-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "api-24", "load-dynamic"] }
+ndarray = "0.17"
+tokio = { version = "1", features = ["sync"] }
+
+# Keep this crate out of any parent workspace.
+[workspace]

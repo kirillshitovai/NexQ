@@ -20,6 +20,13 @@ use tokio::sync::mpsc;
 use crate::audio::AudioChunk;
 use crate::stt::provider::{STTProvider, STTProviderType, TranscriptResult};
 
+// NeMo Parakeet TDT (offline transducer): front end, TDT decoding, segmenter and stream driver live in
+// these two modules; this file only routes Parakeet models to them (see nemo_parakeet.rs).
+#[path = "nemo_parakeet_core.rs"]
+mod nemo_parakeet_core;
+#[path = "nemo_parakeet.rs"]
+mod nemo_parakeet;
+
 /// Audio sample rate expected by the models.
 const SAMPLE_RATE: u32 = 16_000;
 
@@ -607,6 +614,24 @@ fn inference_thread_main(
     };
 
     debug("info", "Inference thread started, loading models...");
+
+    // NeMo Parakeet TDT is an offline transducer: it needs its own front end, TDT decoding and
+    // segmentation, not the streaming Zipformer pipeline below.
+    if _model_dir.to_string_lossy().to_ascii_lowercase().contains("parakeet") {
+        nemo_parakeet::run(
+            encoder_path,
+            decoder_path,
+            joiner_path,
+            tokens_path,
+            language,
+            stop_flag,
+            audio_rx,
+            result_tx,
+            segment_counter_start,
+            &debug,
+        );
+        return;
+    }
 
     // Load tokens
     let tokens = match load_tokens(&tokens_path) {
